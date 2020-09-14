@@ -20,6 +20,10 @@ def causal_normalize(t, eps=1e-8):
     s = cum_mean(t ** 2).diagonal(dim1=-2, dim2=-1)[..., None]
     return t * torch.rsqrt(s + eps)
 
+def softmax(t, eps=1e-8):
+    a = F.softmax(dim=-1, keepdim=True)
+    return a
+
 # helper classes
 
 class Residual(nn.Module):
@@ -62,9 +66,10 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 class Attention(nn.Module):
-    def __init__(self, dim, heads = 8, causal = False, shared_kv = False):
+    def __init__(self, dim, heads = 8, causal = False, softmax = False, shared_kv = False):
         super().__init__()
         self.causal = causal
+        self.softmax = softmax
         self.heads = heads
         self.scale = dim ** -0.5
         self.shared_kv = shared_kv
@@ -89,11 +94,20 @@ class Attention(nn.Module):
 
         dots = torch.einsum('bhid,bhjd->bhij', q, k) * self.scale
 
-        if self.causal:
+        if self.causal and self.softmax:
+            mask = torch.ones(n, n, device = device).triu_(1).bool()
+            dots.masked_fill_(mask, -1e6)
+        elif self.causal and not self.softmax:
             mask = torch.ones(n, n, device = device).triu_(1).bool()
             dots.masked_fill_(mask, 0.)
 
-        normalize_fn = causal_normalize if self.causal else normalize
+        if self.softmax:
+            normalize_fn = softmax
+        elif self.causal and not self.softmax:
+            normalize_fn = causal_normalize
+        else:
+            normalize_fn = normalize
+
         normed_attn = normalize_fn(dots)
         attn = normed_attn * self.norm_g + self.norm_b
 
@@ -106,12 +120,12 @@ class Attention(nn.Module):
         return out
 
 class Transformer(nn.Module):
-    def __init__(self, dim, depth, heads = 8, causal = False, only_norm = False, shared_kv = False):
+    def __init__(self, dim, depth, heads = 8, causal = False, softmax = False, only_norm = False, shared_kv = False):
         super().__init__()
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                Residual(PostNorm(dim, Attention(dim, heads, causal = causal, shared_kv = shared_kv))),
+                Residual(PostNorm(dim, Attention(dim, heads, causal = causal, softmax = softmax, shared_kv = shared_kv))),
                 Residual(PreNorm(dim, FeedForward(dim))) if not only_norm else nn.Identity(),
             ]))
 
@@ -122,13 +136,13 @@ class Transformer(nn.Module):
         return x
 
 class TransformerLM(nn.Module):
-    def __init__(self, *, num_tokens, dim, depth, max_seq_len, heads = 8, causal = False, only_norm = False, shared_kv = False):
+    def __init__(self, *, num_tokens, dim, depth, max_seq_len, heads = 8, causal = False, softmax = False, only_norm = False, shared_kv = False):
         super().__init__()
         self.max_seq_len = max_seq_len
 
         self.token_emb = nn.Embedding(num_tokens, dim)
         self.pos_emb = nn.Embedding(max_seq_len, dim)
-        self.transformer = Transformer(dim, depth, heads, causal = causal, only_norm = only_norm, shared_kv = shared_kv)
+        self.transformer = Transformer(dim, depth, heads, causal = causal, softmax = softmax, only_norm = only_norm, shared_kv = shared_kv)
         self.to_logits = nn.Linear(dim, num_tokens)
 
     def forward(self, x, **kwargs):

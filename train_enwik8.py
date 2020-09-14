@@ -43,6 +43,7 @@ model = TransformerLM(
     max_seq_len = SEQ_LEN,
     heads = 8,
     causal = True,
+    softmax = False,
     only_norm = True,
     shared_kv = True
 )
